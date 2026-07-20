@@ -1,0 +1,504 @@
+openapi: 3.0.3
+
+info:
+  title: Life Tracker API
+  version: 0.1.0
+  description: |
+    The wire contract for Life Tracker. This document is the SINGLE source of truth for the
+    shape of every request and response. Frontends generate their clients from it and never
+    hand-write a request or response type; the backend generates nothing but must match it.
+
+    This first cut covers the **Identity & Sharing** surface only — registration, login,
+    tokens, sessions, and the management of how a Book is shared. The **Ledger** surface
+    (transactions, accounts, balances, and the read endpoints a viewer actually calls) is
+    deliberately NOT here yet; it is a separate, larger design and will be added later. If you
+    need a Ledger field, STOP and design it — do not invent one here.
+
+    ## Conventions
+    - **Money crosses the wire as a string**: `{ "amount": "12.34", "currency": "USD" }`. A JSON
+      number is an IEEE 754 double in JavaScript and is corrupted before any client reads it.
+      No money fields appear in this identity slice, but the rule holds the moment the Ledger
+      surface lands.
+    - **Time** is RFC 3339 / ISO 8601 UTC (`format: date-time`).
+    - **Errors** use RFC 7807 `application/problem+json` (see `Problem`).
+    - **Ids** are UUIDs unless noted.
+
+servers:
+  - url: https://api.lifetracker.example/v1
+    description: Placeholder — the real host lands with deployment.
+
+tags:
+  - name: auth
+    description: Registration, login, token refresh, logout.
+  - name: sessions
+    description: A User's active logins (one per device); listing and revoking them.
+  - name: me
+    description: The authenticated User and the sharing of their own Book.
+  - name: sharing
+    description: Opening a Book to viewers — the anonymous Share Link and named View Grants.
+
+# Every operation requires a valid access token UNLESS it overrides this with `security: []`.
+security:
+  - bearerAuth: []
+
+paths:
+  /auth/register:
+    post:
+      tags: [auth]
+      summary: Register a new User (open self-serve signup)
+      description: |
+        Creates a User and their (empty) Book. Open to anyone. Takes an email and a password;
+        no email verification in this version (an `email_verified` flag exists but is not
+        exercised yet). Does NOT log the User in — the client calls `/auth/login` next.
+      operationId: register
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/RegisterRequest' }
+      responses:
+        '201':
+          description: User created.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/User' }
+        '409':
+          description: That email already belongs to a User.
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/Problem' }
+        '422':
+          description: Email malformed or password fails policy.
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/Problem' }
+
+  /auth/login:
+    post:
+      tags: [auth]
+      summary: Authenticate and open a Session
+      description: |
+        Verifies the password and, on success, opens a new **Session** (one login lineage,
+        one device) and issues a short-lived access token plus a rotating refresh token.
+
+        **Token delivery** (a choice made for this contract — confirm it fits):
+        - `accessToken` is ALWAYS returned in the body. Clients send it as
+          `Authorization: Bearer <token>`.
+        - The refresh token is delivered TWO ways so browser and native clients each use their
+          safe idiom:
+          - Browser / Electron: as an httpOnly, Secure, SameSite=Strict cookie (`Set-Cookie:
+            refresh_token=...`). JavaScript cannot read it, so XSS cannot steal it. These
+            clients ignore `refreshToken` in the body.
+          - React Native (no cookie jar): reads `refreshToken` from the body and stores it in
+            the OS secure store.
+      operationId: login
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/LoginRequest' }
+      responses:
+        '200':
+          description: Authenticated. Session opened; tokens issued.
+          headers:
+            Set-Cookie:
+              description: |
+                httpOnly refresh cookie for browser/Electron clients
+                (`refresh_token=<token>; HttpOnly; Secure; SameSite=Strict; Path=/auth`).
+              schema: { type: string }
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/TokenResponse' }
+        '401':
+          description: Email unknown or password wrong. Deliberately indistinguishable (no user enumeration).
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/Problem' }
+        '429':
+          description: Too many attempts — temporary lockout (brute-force protection).
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/Problem' }
+
+  /auth/refresh:
+    post:
+      tags: [auth]
+      summary: Rotate the refresh token and mint a fresh access token
+      description: |
+        Single-use rotation: consumes the presented refresh token, issues a NEW access token
+        and a NEW refresh token, and advances the Session. If a token that was already rotated
+        away is presented (theft signal), the whole Session is revoked and this returns 401.
+
+        The refresh token is read from the httpOnly cookie (browser/Electron) or from the body
+        (`refreshToken`, native). It is NOT the access bearer token.
+      operationId: refresh
+      security: []
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/RefreshRequest' }
+      responses:
+        '200':
+          description: Rotated. New access token in the body; new refresh token via the same channel as login.
+          headers:
+            Set-Cookie:
+              description: New httpOnly refresh cookie for browser/Electron clients.
+              schema: { type: string }
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/TokenResponse' }
+        '401':
+          description: Refresh token missing, expired, unknown, or replayed (Session revoked).
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/Problem' }
+
+  /auth/logout:
+    post:
+      tags: [auth]
+      summary: End the current Session
+      description: Revokes the Session behind the presented access token and clears the refresh cookie.
+      operationId: logout
+      responses:
+        '204':
+          description: Current Session ended.
+          headers:
+            Set-Cookie:
+              description: Expires the refresh cookie.
+              schema: { type: string }
+        '401':
+          description: Not authenticated.
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/Problem' }
+
+  /auth/sessions:
+    get:
+      tags: [sessions]
+      summary: List the User's active Sessions (the "active devices" screen)
+      operationId: listSessions
+      responses:
+        '200':
+          description: The caller's active Sessions.
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/Session' }
+        '401':
+          description: Not authenticated.
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/Problem' }
+    delete:
+      tags: [sessions]
+      summary: Sign out everywhere
+      description: Revokes ALL of the caller's Sessions, including the current one.
+      operationId: revokeAllSessions
+      responses:
+        '204':
+          description: All Sessions revoked.
+        '401':
+          description: Not authenticated.
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/Problem' }
+
+  /auth/sessions/{sessionId}:
+    delete:
+      tags: [sessions]
+      summary: Revoke one Session (remote logout of a device)
+      operationId: revokeSession
+      parameters:
+        - name: sessionId
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        '204':
+          description: Session revoked.
+        '401':
+          description: Not authenticated.
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/Problem' }
+        '404':
+          description: No such Session belonging to the caller.
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/Problem' }
+
+  /me:
+    get:
+      tags: [me]
+      summary: The authenticated User
+      operationId: getMe
+      responses:
+        '200':
+          description: The caller.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/User' }
+        '401':
+          description: Not authenticated.
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/Problem' }
+
+  /me/share-link:
+    get:
+      tags: [sharing]
+      summary: Get the active Share Link for my Book
+      description: The single anonymous "anyone with the link can view" URL, if sharing is on.
+      operationId: getShareLink
+      responses:
+        '200':
+          description: The active Share Link.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ShareLink' }
+        '404':
+          description: Link sharing is off for this Book.
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/Problem' }
+    post:
+      tags: [sharing]
+      summary: Turn on link sharing (mint the Share Link)
+      description: |
+        Mints the single Share Link for the caller's Book. If one is already active, returns
+        it (409 is not used — turning on an already-on switch is a no-op that yields the link).
+        To rotate, DELETE then POST — a fresh, unguessable token is minted and the old URL
+        stays dead forever.
+      operationId: createShareLink
+      responses:
+        '200':
+          description: Sharing already on; the existing link.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ShareLink' }
+        '201':
+          description: Sharing turned on; a new link minted.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ShareLink' }
+        '401':
+          description: Not authenticated.
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/Problem' }
+    delete:
+      tags: [sharing]
+      summary: Revoke the Share Link (turn link sharing off)
+      description: Burns the token permanently. Anyone still holding the URL gets nothing. Re-enabling mints a new one.
+      operationId: revokeShareLink
+      responses:
+        '204':
+          description: Link revoked (or already off).
+        '401':
+          description: Not authenticated.
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/Problem' }
+
+  /me/view-grants:
+    get:
+      tags: [sharing]
+      summary: List the View Grants I have extended
+      operationId: listViewGrants
+      responses:
+        '200':
+          description: Named people who may read my Book.
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/ViewGrant' }
+        '401':
+          description: Not authenticated.
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/Problem' }
+    post:
+      tags: [sharing]
+      summary: Grant a named User read access to my Book
+      description: |
+        The grantee must ALREADY be a registered User (email-based invites are deferred). If
+        the email belongs to no User, this returns 404 — "ask them to sign up first".
+      operationId: createViewGrant
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/CreateViewGrantRequest' }
+      responses:
+        '201':
+          description: Grant created.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ViewGrant' }
+        '401':
+          description: Not authenticated.
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/Problem' }
+        '404':
+          description: No registered User owns that email.
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/Problem' }
+        '409':
+          description: That User already holds a grant on this Book.
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/Problem' }
+
+  /me/view-grants/{grantId}:
+    delete:
+      tags: [sharing]
+      summary: Revoke a View Grant
+      operationId: revokeViewGrant
+      parameters:
+        - name: grantId
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        '204':
+          description: Grant revoked.
+        '401':
+          description: Not authenticated.
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/Problem' }
+        '404':
+          description: No such grant on the caller's Book.
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/Problem' }
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: |
+        The short-lived RS256 access token from `/auth/login` or `/auth/refresh`. Validated by
+        signature against the JWKS public key; the backend never calls a session store on the
+        read path. The refresh token is a separate credential (httpOnly cookie or body) and is
+        NOT sent here.
+
+  schemas:
+    RegisterRequest:
+      type: object
+      required: [email, password]
+      properties:
+        email: { type: string, format: email, maxLength: 254 }
+        password:
+          type: string
+          format: password
+          minLength: 12
+          maxLength: 128
+          description: Minimum length is provisional; the full policy is a follow-on decision.
+      additionalProperties: false
+
+    LoginRequest:
+      type: object
+      required: [email, password]
+      properties:
+        email: { type: string, format: email }
+        password: { type: string, format: password }
+        deviceLabel:
+          type: string
+          maxLength: 100
+          description: Human label for the Session on the "active devices" screen, e.g. "Pixel 8" or "Chrome on Mac".
+      additionalProperties: false
+
+    RefreshRequest:
+      type: object
+      description: Body form of refresh, for native clients. Browser/Electron send the token via the httpOnly cookie instead and may omit this body entirely.
+      properties:
+        refreshToken: { type: string }
+      additionalProperties: false
+
+    TokenResponse:
+      type: object
+      required: [accessToken, tokenType, expiresIn]
+      properties:
+        accessToken: { type: string, description: RS256 JWT. }
+        tokenType: { type: string, enum: [Bearer] }
+        expiresIn: { type: integer, description: Access-token lifetime in seconds (~900). }
+        refreshToken:
+          type: string
+          nullable: true
+          description: Present for native clients; null/absent for browser clients, which receive it as an httpOnly cookie.
+      additionalProperties: false
+
+    User:
+      type: object
+      required: [id, email, createdAt]
+      properties:
+        id: { type: string, format: uuid }
+        email: { type: string, format: email }
+        createdAt: { type: string, format: date-time }
+      additionalProperties: false
+
+    Session:
+      type: object
+      required: [id, createdAt, lastActiveAt, current]
+      properties:
+        id: { type: string, format: uuid }
+        deviceLabel: { type: string, nullable: true }
+        createdAt: { type: string, format: date-time }
+        lastActiveAt: { type: string, format: date-time }
+        current: { type: boolean, description: True for the Session making this request. }
+      additionalProperties: false
+
+    ShareLink:
+      type: object
+      required: [url, createdAt]
+      properties:
+        url:
+          type: string
+          format: uri
+          description: The full "anyone with the link" URL, carrying the unguessable token. Re-copyable while active.
+        createdAt: { type: string, format: date-time }
+      additionalProperties: false
+
+    CreateViewGrantRequest:
+      type: object
+      required: [email]
+      properties:
+        email:
+          type: string
+          format: email
+          description: Must belong to an already-registered User.
+      additionalProperties: false
+
+    ViewGrant:
+      type: object
+      required: [id, granteeEmail, granteeUserId, createdAt]
+      properties:
+        id: { type: string, format: uuid }
+        granteeEmail: { type: string, format: email }
+        granteeUserId: { type: string, format: uuid }
+        createdAt: { type: string, format: date-time }
+      additionalProperties: false
+
+    Problem:
+      type: object
+      description: RFC 7807 problem detail.
+      required: [title, status]
+      properties:
+        type: { type: string, format: uri, default: 'about:blank' }
+        title: { type: string }
+        status: { type: integer }
+        detail: { type: string }
+        code:
+          type: string
+          description: Stable machine-readable code for the specific domain error, e.g. EMAIL_TAKEN, REFRESH_REPLAYED.
+      additionalProperties: false
