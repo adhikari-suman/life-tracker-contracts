@@ -18,7 +18,8 @@ hand-agreed by memory; it is agreed *here*.
 
 This first cut covers **Identity & Sharing** only:
 
-- **Auth** — register, login, refresh, logout.
+- **Auth** — register, login, refresh, logout, and the JWKS public keys (`/.well-known/jwks.json`)
+  that resource servers use to verify access tokens.
 - **Sessions** — list active logins, revoke one, sign out everywhere.
 - **Sharing** — the single anonymous Share Link, and named View Grants.
 
