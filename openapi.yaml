@@ -2,7 +2,7 @@ openapi: 3.0.3
 
 info:
   title: Life Tracker API
-  version: 0.2.0
+  version: 0.2.1
   description: |
     The wire contract for Life Tracker. This document is the SINGLE source of truth for the
     shape of every request and response. Frontends generate their clients from it and never
@@ -111,7 +111,14 @@ paths:
             application/problem+json:
               schema: { $ref: '#/components/schemas/Problem' }
         '429':
-          description: Too many attempts — temporary lockout (brute-force protection).
+          description: |
+            Too many failed attempts for this email — a temporary lockout (brute-force protection).
+            Counted per email whether or not it is registered, so a lockout never reveals which
+            emails exist. Code `TOO_MANY_ATTEMPTS`.
+          headers:
+            Retry-After:
+              description: Whole seconds to wait before retrying, until the lockout window drains.
+              schema: { type: integer }
           content:
             application/problem+json:
               schema: { $ref: '#/components/schemas/Problem' }
@@ -529,7 +536,7 @@ components:
         code:
           type: string
           description: |
-            Stable machine-readable code for the specific error. One of: UNAUTHORIZED, EMAIL_TAKEN,
-            VALIDATION, SESSION_NOT_FOUND, GRANTEE_NOT_FOUND, VIEW_GRANT_EXISTS,
-            VIEW_GRANT_NOT_FOUND, CANNOT_SHARE_WITH_SELF, SHARE_LINK_NOT_FOUND.
+            Stable machine-readable code for the specific error. One of: UNAUTHORIZED,
+            TOO_MANY_ATTEMPTS, EMAIL_TAKEN, VALIDATION, SESSION_NOT_FOUND, GRANTEE_NOT_FOUND,
+            VIEW_GRANT_EXISTS, VIEW_GRANT_NOT_FOUND, CANNOT_SHARE_WITH_SELF, SHARE_LINK_NOT_FOUND.
       additionalProperties: false
