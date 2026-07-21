@@ -43,10 +43,17 @@ repo holds the spec, not the clients.
 
 The shape here follows the design captured in the backend's ADRs — see
 `../life-tracker-backend/docs/adr/0005`…`0008` and `../life-tracker-backend/docs/identity/CONTEXT.md`.
-Two details were chosen while writing the spec (not yet ratified) and are flagged inline in
-`openapi.yaml`:
+Two details were chosen while writing the spec and are flagged inline in `openapi.yaml`; both
+are now ratified:
 
-1. **Register does not auto-login** — it returns the new `User`; the client then calls
-   `/auth/login`.
-2. **Refresh-token delivery is split by client** — httpOnly cookie for browser/Electron, response
-   body for React Native. `accessToken` is always in the body.
+1. **Register auto-logs-in** — it opens a Session and returns an access + refresh token,
+   exactly like `/auth/login`. Email verification, when added later, will gate what an
+   unverified User may do, not whether they are signed in.
+2. **Refresh-token delivery: both tokens in the body** — every client gets `accessToken` and
+   `refreshToken` in the JSON and stores them itself; `/auth/refresh` reads the refresh token
+   from the body. Uniform and simple to build against.
+
+   > **Pre-production hardening (tracked):** a refresh token in JS-reachable storage on web is
+   > an XSS exposure. Before the web client faces real users, move browser/Electron refresh
+   > delivery to an httpOnly, Secure, SameSite cookie (native keeps the body). A deliberate
+   > future spec change — do not ship web without it.

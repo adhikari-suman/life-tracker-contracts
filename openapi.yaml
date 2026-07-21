@@ -47,9 +47,11 @@ paths:
       tags: [auth]
       summary: Register a new User (open self-serve signup)
       description: |
-        Creates a User and their (empty) Book. Open to anyone. Takes an email and a password;
-        no email verification in this version (an `email_verified` flag exists but is not
-        exercised yet). Does NOT log the User in — the client calls `/auth/login` next.
+        Creates a User and their (empty) Book, then AUTO-LOGS-IN: opens a Session and returns
+        an access token plus a refresh token, exactly like `/auth/login`. Open to anyone. No
+        email verification in this version (an `email_verified` flag exists but is not yet
+        exercised); verification, when added later, will gate what an unverified User may do —
+        not whether they are signed in. Both tokens are returned in the body, as by `/auth/login`.
       operationId: register
       security: []
       requestBody:
@@ -59,10 +61,10 @@ paths:
             schema: { $ref: '#/components/schemas/RegisterRequest' }
       responses:
         '201':
-          description: User created.
+          description: User created and signed in — Session opened, both tokens returned in the body (same shape as login).
           content:
             application/json:
-              schema: { $ref: '#/components/schemas/User' }
+              schema: { $ref: '#/components/schemas/TokenResponse' }
         '409':
           description: That email already belongs to a User.
           content:
@@ -82,16 +84,14 @@ paths:
         Verifies the password and, on success, opens a new **Session** (one login lineage,
         one device) and issues a short-lived access token plus a rotating refresh token.
 
-        **Token delivery** (a choice made for this contract — confirm it fits):
-        - `accessToken` is ALWAYS returned in the body. Clients send it as
-          `Authorization: Bearer <token>`.
-        - The refresh token is delivered TWO ways so browser and native clients each use their
-          safe idiom:
-          - Browser / Electron: as an httpOnly, Secure, SameSite=Strict cookie (`Set-Cookie:
-            refresh_token=...`). JavaScript cannot read it, so XSS cannot steal it. These
-            clients ignore `refreshToken` in the body.
-          - React Native (no cookie jar): reads `refreshToken` from the body and stores it in
-            the OS secure store.
+        **Token delivery (v1):** both `accessToken` and `refreshToken` are returned in the JSON
+        body, uniformly for every client, which stores them itself. `accessToken` is sent back
+        as `Authorization: Bearer <token>`; `refreshToken` is presented to `/auth/refresh`.
+
+        > PRE-PRODUCTION HARDENING: keeping the refresh token in JS-reachable storage on web is
+        > an XSS exposure. Before the web client faces real users, move browser/Electron refresh
+        > delivery to an httpOnly, Secure, SameSite cookie (native clients keep the body). That
+        > is a deliberate future spec change, tracked in the README.
       operationId: login
       security: []
       requestBody:
@@ -101,13 +101,7 @@ paths:
             schema: { $ref: '#/components/schemas/LoginRequest' }
       responses:
         '200':
-          description: Authenticated. Session opened; tokens issued.
-          headers:
-            Set-Cookie:
-              description: |
-                httpOnly refresh cookie for browser/Electron clients
-                (`refresh_token=<token>; HttpOnly; Secure; SameSite=Strict; Path=/auth`).
-              schema: { type: string }
+          description: Authenticated. Session opened; both tokens returned in the body.
           content:
             application/json:
               schema: { $ref: '#/components/schemas/TokenResponse' }
@@ -131,22 +125,18 @@ paths:
         and a NEW refresh token, and advances the Session. If a token that was already rotated
         away is presented (theft signal), the whole Session is revoked and this returns 401.
 
-        The refresh token is read from the httpOnly cookie (browser/Electron) or from the body
-        (`refreshToken`, native). It is NOT the access bearer token.
+        The refresh token is sent in the body (`refreshToken`). It is NOT the access bearer
+        token.
       operationId: refresh
       security: []
       requestBody:
-        required: false
+        required: true
         content:
           application/json:
             schema: { $ref: '#/components/schemas/RefreshRequest' }
       responses:
         '200':
-          description: Rotated. New access token in the body; new refresh token via the same channel as login.
-          headers:
-            Set-Cookie:
-              description: New httpOnly refresh cookie for browser/Electron clients.
-              schema: { type: string }
+          description: Rotated. New access token and new refresh token in the body.
           content:
             application/json:
               schema: { $ref: '#/components/schemas/TokenResponse' }
@@ -160,15 +150,11 @@ paths:
     post:
       tags: [auth]
       summary: End the current Session
-      description: Revokes the Session behind the presented access token and clears the refresh cookie.
+      description: Revokes the Session behind the presented access token. The client discards its stored tokens.
       operationId: logout
       responses:
         '204':
           description: Current Session ended.
-          headers:
-            Set-Cookie:
-              description: Expires the refresh cookie.
-              schema: { type: string }
         '401':
           description: Not authenticated.
           content:
@@ -389,8 +375,8 @@ components:
       description: |
         The short-lived RS256 access token from `/auth/login` or `/auth/refresh`. Validated by
         signature against the JWKS public key; the backend never calls a session store on the
-        read path. The refresh token is a separate credential (httpOnly cookie or body) and is
-        NOT sent here.
+        read path. The refresh token is a separate credential (sent in the body to
+        `/auth/refresh`) and is NOT sent here.
 
   schemas:
     RegisterRequest:
@@ -420,22 +406,22 @@ components:
 
     RefreshRequest:
       type: object
-      description: Body form of refresh, for native clients. Browser/Electron send the token via the httpOnly cookie instead and may omit this body entirely.
+      required: [refreshToken]
+      description: The refresh token to rotate, as returned by login / register / refresh.
       properties:
         refreshToken: { type: string }
       additionalProperties: false
 
     TokenResponse:
       type: object
-      required: [accessToken, tokenType, expiresIn]
+      required: [accessToken, tokenType, expiresIn, refreshToken]
       properties:
         accessToken: { type: string, description: RS256 JWT. }
         tokenType: { type: string, enum: [Bearer] }
         expiresIn: { type: integer, description: Access-token lifetime in seconds (~900). }
         refreshToken:
           type: string
-          nullable: true
-          description: Present for native clients; null/absent for browser clients, which receive it as an httpOnly cookie.
+          description: Opaque rotating refresh token. Returned in the body for every client in v1 (see the pre-production hardening note on /auth/login).
       additionalProperties: false
 
     User:
