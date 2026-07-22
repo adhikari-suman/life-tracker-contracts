@@ -16,22 +16,24 @@ hand-agreed by memory; it is agreed *here*.
 
 ## Scope today
 
-This first cut covers **Identity & Sharing** only:
+**Identity & Sharing**, and the first slice of the **Ledger**:
 
-- **Auth** — register, login, refresh, logout, and the JWKS public keys (`/.well-known/jwks.json`)
-  that resource servers use to verify access tokens.
+- **Auth** — register, login, refresh, logout, email verification, password reset, and the JWKS
+  public keys (`/.well-known/jwks.json`) that resource servers use to verify access tokens.
 - **Sessions** — list active logins, revoke one, sign out everywhere.
 - **Sharing** — the single anonymous Share Link, and named View Grants.
+- **Ledger (accounts + transactions)** — create/list accounts (kind + fixed currency, with a
+  computed balance), and record transactions as balanced movements (`from → to`).
 
-The **Ledger** surface (transactions, accounts, balances, and the read endpoints a viewer
-actually calls) is **not here yet** — it is a separate, larger design. Do not invent Ledger
-fields in this file.
+Still to come in the Ledger: balance-based reporting (net worth, spending, income), cross-currency
+transactions, splits and metadata, and the read endpoints a viewer calls. Do not invent Ledger
+fields — design them here first.
 
 ## Conventions
 
 - **Money is a string on the wire**: `{ "amount": "12.34", "currency": "USD" }`. A JSON number is
-  a JavaScript double and is already wrong. (No money in the identity slice; the rule bites the
-  moment the Ledger surface lands.)
+  a JavaScript double and is already wrong. Posting amounts are non-negative; a balance may be
+  negative (`"-5.00"`).
 - Time is RFC 3339 UTC. Ids are UUIDs. Errors are RFC 7807 `application/problem+json`.
 
 ## Regenerating clients

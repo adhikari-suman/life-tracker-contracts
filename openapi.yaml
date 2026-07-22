@@ -2,17 +2,17 @@ openapi: 3.0.3
 
 info:
   title: Life Tracker API
-  version: 0.3.0
+  version: 0.4.0
   description: |
     The wire contract for Life Tracker. This document is the SINGLE source of truth for the
     shape of every request and response. Frontends generate their clients from it and never
     hand-write a request or response type; the backend generates nothing but must match it.
 
-    This first cut covers the **Identity & Sharing** surface only — registration, login,
-    tokens, sessions, and the management of how a Book is shared. The **Ledger** surface
-    (transactions, accounts, balances, and the read endpoints a viewer actually calls) is
-    deliberately NOT here yet; it is a separate, larger design and will be added later. If you
-    need a Ledger field, STOP and design it — do not invent one here.
+    This document covers **Identity & Sharing** (registration, login, tokens, sessions, and the
+    management of how a Book is shared) AND the first slice of the **Ledger** — accounts, and
+    recording transactions as balanced movements. Still to come: balance-based reporting (net worth,
+    spending, income), cross-currency transactions, splits and metadata, and the read endpoints a
+    viewer calls. If you need a Ledger field that isn't here, STOP and design it — do not invent one.
 
     ## Conventions
     - **Money crosses the wire as a string**: `{ "amount": "12.34", "currency": "USD" }`. A JSON
@@ -36,6 +36,10 @@ tags:
     description: The authenticated User and the sharing of their own Book.
   - name: sharing
     description: Opening a Book to viewers — the anonymous Share Link and named View Grants.
+  - name: accounts
+    description: The Ledger's accounts — where balances live, each with a kind and a fixed currency.
+  - name: transactions
+    description: Recording money movement as balanced double-entry postings.
 
 # Every operation requires a valid access token UNLESS it overrides this with `security: []`.
 security:
@@ -480,6 +484,170 @@ paths:
             application/problem+json:
               schema: { $ref: '#/components/schemas/Problem' }
 
+  /accounts:
+    post:
+      tags: [accounts]
+      summary: Create an account
+      description: |
+        Creates an account in the caller's Book. An account has a **kind** (which fixes its
+        debit/credit behaviour and reporting role — ADR-0001) and a **fixed currency** every posting
+        to it must match (ADR-0002). Accounts exist only where a reconcilable balance lives (a bank,
+        a card, a friend's IOU); a shop you pay on the spot is metadata, never an account (ADR-0003).
+      operationId: createAccount
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/CreateAccountRequest' }
+      responses:
+        '201':
+          description: Account created.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Account' }
+        '401':
+          description: Not authenticated.
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/Problem' }
+        '422':
+          description: Name, kind, or currency is invalid.
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/Problem' }
+    get:
+      tags: [accounts]
+      summary: List the caller's accounts, each with its current balance
+      operationId: listAccounts
+      responses:
+        '200':
+          description: The caller's accounts.
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/Account' }
+        '401':
+          description: Not authenticated.
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/Problem' }
+
+  /accounts/{accountId}:
+    get:
+      tags: [accounts]
+      summary: Get one account with its current balance
+      operationId: getAccount
+      parameters:
+        - name: accountId
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        '200':
+          description: The account.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Account' }
+        '401':
+          description: Not authenticated.
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/Problem' }
+        '404':
+          description: No such account in the caller's Book. Code `ACCOUNT_NOT_FOUND`.
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/Problem' }
+
+  /transactions:
+    post:
+      tags: [transactions]
+      summary: Record a transaction as a movement between two accounts
+      description: |
+        Records money moving from one account to another as a balanced double-entry transaction: the
+        `from` account is credited and the `to` account debited, and the account kinds make the
+        result correct without the caller thinking in debits and credits (ADR-0012). Both accounts
+        must share the `amount`'s currency — cross-currency movements are a later slice
+        (`CROSS_CURRENCY_UNSUPPORTED`). `from` and `to` must differ (`SAME_ACCOUNT`).
+
+        An opening balance is simply a movement from an Equity account into the new account (ADR-0004).
+      operationId: recordTransaction
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/RecordTransactionRequest' }
+      responses:
+        '201':
+          description: Transaction recorded; its balanced postings are returned.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Transaction' }
+        '401':
+          description: Not authenticated.
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/Problem' }
+        '422':
+          description: |
+            A referenced account does not exist (`ACCOUNT_NOT_FOUND`), the two accounts are the same
+            (`SAME_ACCOUNT`), they differ in currency (`CROSS_CURRENCY_UNSUPPORTED`), or the amount is
+            malformed or negative (`VALIDATION`).
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/Problem' }
+    get:
+      tags: [transactions]
+      summary: List the caller's transactions, newest first
+      operationId: listTransactions
+      parameters:
+        - name: accountId
+          in: query
+          required: false
+          description: If given, only transactions with a posting to this account.
+          schema: { type: string, format: uuid }
+      responses:
+        '200':
+          description: The caller's transactions.
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/Transaction' }
+        '401':
+          description: Not authenticated.
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/Problem' }
+
+  /transactions/{transactionId}:
+    get:
+      tags: [transactions]
+      summary: Get one transaction
+      operationId: getTransaction
+      parameters:
+        - name: transactionId
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        '200':
+          description: The transaction.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Transaction' }
+        '401':
+          description: Not authenticated.
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/Problem' }
+        '404':
+          description: No such transaction in the caller's Book. Code `TRANSACTION_NOT_FOUND`.
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/Problem' }
+
   /.well-known/jwks.json:
     get:
       tags: [auth]
@@ -660,6 +828,102 @@ components:
               n: { type: string, description: RSA modulus, base64url. }
               e: { type: string, description: RSA exponent, base64url. }
 
+    Money:
+      type: object
+      description: |
+        A monetary amount as a decimal STRING (never a JSON number — a double corrupts it before any
+        client reads it) plus an ISO 4217 currency. Posting amounts are non-negative; a balance may
+        be negative.
+      required: [amount, currency]
+      properties:
+        amount:
+          type: string
+          description: Decimal, up to 4 fractional digits, e.g. "12.34". A balance may be negative, e.g. "-5.00".
+        currency:
+          type: string
+          minLength: 3
+          maxLength: 3
+          description: ISO 4217 code, e.g. "USD".
+      additionalProperties: false
+
+    AccountKind:
+      type: string
+      description: |
+        Fixes the debit/credit normal side and reporting role (ADR-0001). Asset & Expense grow on
+        debit; Liability, Income, Equity grow on credit. Net worth = Assets − Liabilities; spending =
+        Expense totals; earning = Income totals; Equity is opening capital only.
+      enum: [ASSET, LIABILITY, INCOME, EXPENSE, EQUITY]
+
+    CreateAccountRequest:
+      type: object
+      required: [name, kind, currency]
+      properties:
+        name: { type: string, minLength: 1, maxLength: 100 }
+        kind: { $ref: '#/components/schemas/AccountKind' }
+        currency:
+          type: string
+          minLength: 3
+          maxLength: 3
+          description: ISO 4217 code; every posting to this account is in this currency.
+      additionalProperties: false
+
+    Account:
+      type: object
+      required: [id, name, kind, currency, balance]
+      properties:
+        id: { type: string, format: uuid }
+        name: { type: string }
+        kind: { $ref: '#/components/schemas/AccountKind' }
+        currency: { type: string, description: ISO 4217 code. }
+        balance:
+          allOf:
+            - $ref: '#/components/schemas/Money'
+          description: Current balance, computed from postings (ADR-0004). Signed — may be negative.
+      additionalProperties: false
+
+    Posting:
+      type: object
+      description: One leg of a transaction — a debit or credit of a non-negative amount to an account.
+      required: [accountId, direction, amount]
+      properties:
+        accountId: { type: string, format: uuid }
+        direction: { type: string, enum: [DEBIT, CREDIT] }
+        amount: { $ref: '#/components/schemas/Money' }
+      additionalProperties: false
+
+    RecordTransactionRequest:
+      type: object
+      description: A movement — money out of `from`, into `to`. Booked as credit(from) + debit(to).
+      required: [date, from, to, amount]
+      properties:
+        date:
+          type: string
+          format: date
+          description: The calendar date of the transaction (a precise timestamp is metadata, ADR-0003).
+        from:
+          type: string
+          format: uuid
+          description: The account money leaves (credited).
+        to:
+          type: string
+          format: uuid
+          description: The account money arrives in (debited).
+        amount: { $ref: '#/components/schemas/Money' }
+      additionalProperties: false
+
+    Transaction:
+      type: object
+      description: A recorded transaction, as its balanced postings (the ledger truth, ADR-0012).
+      required: [id, date, postings]
+      properties:
+        id: { type: string, format: uuid }
+        date: { type: string, format: date }
+        postings:
+          type: array
+          minItems: 2
+          items: { $ref: '#/components/schemas/Posting' }
+      additionalProperties: false
+
     Problem:
       type: object
       description: RFC 7807 problem detail.
@@ -675,5 +939,6 @@ components:
             Stable machine-readable code for the specific error. One of: UNAUTHORIZED,
             TOO_MANY_ATTEMPTS, EMAIL_TAKEN, VALIDATION, INVALID_TOKEN, EMAIL_NOT_VERIFIED,
             SESSION_NOT_FOUND, GRANTEE_NOT_FOUND, VIEW_GRANT_EXISTS, VIEW_GRANT_NOT_FOUND,
-            CANNOT_SHARE_WITH_SELF, SHARE_LINK_NOT_FOUND.
+            CANNOT_SHARE_WITH_SELF, SHARE_LINK_NOT_FOUND, ACCOUNT_NOT_FOUND, TRANSACTION_NOT_FOUND,
+            SAME_ACCOUNT, CROSS_CURRENCY_UNSUPPORTED.
       additionalProperties: false
