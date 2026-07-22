@@ -2,7 +2,7 @@ openapi: 3.0.3
 
 info:
   title: Life Tracker API
-  version: 0.4.0
+  version: 0.5.0
   description: |
     The wire contract for Life Tracker. This document is the SINGLE source of truth for the
     shape of every request and response. Frontends generate their clients from it and never
@@ -40,6 +40,8 @@ tags:
     description: The Ledger's accounts — where balances live, each with a kind and a fixed currency.
   - name: transactions
     description: Recording money movement as balanced double-entry postings.
+  - name: reports
+    description: Computed-on-demand views — net worth, spending, income. Per currency.
 
 # Every operation requires a valid access token UNLESS it overrides this with `security: []`.
 security:
@@ -648,6 +650,92 @@ paths:
             application/problem+json:
               schema: { $ref: '#/components/schemas/Problem' }
 
+  /reports/net-worth:
+    get:
+      tags: [reports]
+      summary: Net worth — Assets minus Liabilities, per currency
+      description: |
+        Computed on demand (ADR-0004): for each currency, total Asset balances minus total Liability
+        balances. Money owed TO you is an Asset (a Receivable) so it adds; money you owe is a Liability
+        (a Payable) so it subtracts. Valuing across currencies into one figure is out of scope
+        (ADR-0002), so the result is broken down per currency.
+      operationId: getNetWorth
+      responses:
+        '200':
+          description: Net worth per currency.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/NetWorthReport' }
+        '401':
+          description: Not authenticated.
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/Problem' }
+
+  /reports/spending:
+    get:
+      tags: [reports]
+      summary: Spending over a date range — Expense-account activity, per account and currency
+      description: |
+        Sums Expense-account movement over the range (ADR-0004). Transfers, lends, and repayments never
+        touch an Expense account, so they are excluded by construction (ADR-0001) — this is only real
+        spending. Broken down per Expense account, totalled per currency. Omit the range for all-time.
+      operationId: getSpending
+      parameters:
+        - name: from
+          in: query
+          required: false
+          description: Inclusive start date (ISO 8601). Omit for no lower bound.
+          schema: { type: string, format: date }
+        - name: to
+          in: query
+          required: false
+          description: Inclusive end date (ISO 8601). Omit for no upper bound.
+          schema: { type: string, format: date }
+      responses:
+        '200':
+          description: Spending in the range.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ActivityReport' }
+        '401':
+          description: Not authenticated.
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/Problem' }
+
+  /reports/income:
+    get:
+      tags: [reports]
+      summary: Income over a date range — Income-account activity, per account and currency
+      description: |
+        Sums Income-account movement over the range (ADR-0004). Like spending, transfers and repayments
+        are excluded by construction. Broken down per Income account, totalled per currency. Omit the
+        range for all-time.
+      operationId: getIncome
+      parameters:
+        - name: from
+          in: query
+          required: false
+          description: Inclusive start date (ISO 8601). Omit for no lower bound.
+          schema: { type: string, format: date }
+        - name: to
+          in: query
+          required: false
+          description: Inclusive end date (ISO 8601). Omit for no upper bound.
+          schema: { type: string, format: date }
+      responses:
+        '200':
+          description: Income in the range.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ActivityReport' }
+        '401':
+          description: Not authenticated.
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/Problem' }
+
   /.well-known/jwks.json:
     get:
       tags: [auth]
@@ -922,6 +1010,67 @@ components:
           type: array
           minItems: 2
           items: { $ref: '#/components/schemas/Posting' }
+      additionalProperties: false
+
+    CurrencyNetWorth:
+      type: object
+      required: [currency, assets, liabilities, netWorth]
+      properties:
+        currency: { type: string, description: ISO 4217 code. }
+        assets:
+          allOf:
+            - $ref: '#/components/schemas/Money'
+          description: Total of Asset account balances in this currency.
+        liabilities:
+          allOf:
+            - $ref: '#/components/schemas/Money'
+          description: Total of Liability account balances in this currency.
+        netWorth:
+          allOf:
+            - $ref: '#/components/schemas/Money'
+          description: assets − liabilities (signed).
+      additionalProperties: false
+
+    NetWorthReport:
+      type: object
+      required: [byCurrency]
+      properties:
+        byCurrency:
+          type: array
+          items: { $ref: '#/components/schemas/CurrencyNetWorth' }
+      additionalProperties: false
+
+    AccountAmount:
+      type: object
+      required: [accountId, name, currency, amount]
+      properties:
+        accountId: { type: string, format: uuid }
+        name: { type: string }
+        currency: { type: string, description: ISO 4217 code. }
+        amount: { $ref: '#/components/schemas/Money' }
+      additionalProperties: false
+
+    CurrencyAmount:
+      type: object
+      required: [currency, amount]
+      properties:
+        currency: { type: string, description: ISO 4217 code. }
+        amount: { $ref: '#/components/schemas/Money' }
+      additionalProperties: false
+
+    ActivityReport:
+      type: object
+      description: Spending or income over a date range — per account, and totalled per currency.
+      required: [byAccount, totals]
+      properties:
+        from: { type: string, format: date, nullable: true }
+        to: { type: string, format: date, nullable: true }
+        byAccount:
+          type: array
+          items: { $ref: '#/components/schemas/AccountAmount' }
+        totals:
+          type: array
+          items: { $ref: '#/components/schemas/CurrencyAmount' }
       additionalProperties: false
 
     Problem:
