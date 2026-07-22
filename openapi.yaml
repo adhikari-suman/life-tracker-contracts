@@ -2,7 +2,7 @@ openapi: 3.0.3
 
 info:
   title: Life Tracker API
-  version: 0.5.0
+  version: 0.6.0
   description: |
     The wire contract for Life Tracker. This document is the SINGLE source of truth for the
     shape of every request and response. Frontends generate their clients from it and never
@@ -568,10 +568,15 @@ paths:
       summary: Record a transaction as a movement between two accounts
       description: |
         Records money moving from one account to another as a balanced double-entry transaction: the
-        `from` account is credited and the `to` account debited, and the account kinds make the
-        result correct without the caller thinking in debits and credits (ADR-0012). Both accounts
-        must share the `amount`'s currency — cross-currency movements are a later slice
-        (`CROSS_CURRENCY_UNSUPPORTED`). `from` and `to` must differ (`SAME_ACCOUNT`).
+        `from` account is credited and the `to` account debited, and the account kinds make the result
+        correct without the caller thinking in debits and credits (ADR-0012). `from` and `to` must
+        differ (`SAME_ACCOUNT`).
+
+        Same-currency: send `amount` in the shared currency. Cross-currency: send `amount` (leaving
+        `from`) and `toAmount` (arriving in `to`), each in its account's currency; the exchange rate
+        is derived from the two and never multiplied to make an amount (ADR-0002). A cross-currency
+        movement missing `toAmount` is `CONVERTED_AMOUNT_REQUIRED`; each posting's amount must be in
+        its account's currency.
 
         An opening balance is simply a movement from an Equity account into the new account (ADR-0004).
       operationId: recordTransaction
@@ -594,8 +599,9 @@ paths:
         '422':
           description: |
             A referenced account does not exist (`ACCOUNT_NOT_FOUND`), the two accounts are the same
-            (`SAME_ACCOUNT`), they differ in currency (`CROSS_CURRENCY_UNSUPPORTED`), or the amount is
-            malformed or negative (`VALIDATION`).
+            (`SAME_ACCOUNT`), a cross-currency movement is missing `toAmount`
+            (`CONVERTED_AMOUNT_REQUIRED`), or an amount is malformed, negative, or in the wrong
+            currency (`VALIDATION`).
           content:
             application/problem+json:
               schema: { $ref: '#/components/schemas/Problem' }
@@ -981,7 +987,10 @@ components:
 
     RecordTransactionRequest:
       type: object
-      description: A movement — money out of `from`, into `to`. Booked as credit(from) + debit(to).
+      description: |
+        A movement — money out of `from` (credited), into `to` (debited). Same-currency: `amount`
+        alone. Cross-currency: `amount` is the real figure leaving `from` and `toAmount` the real
+        figure arriving in `to`, each in its account's currency (ADR-0002).
       required: [date, from, to, amount]
       properties:
         date:
@@ -996,7 +1005,16 @@ components:
           type: string
           format: uuid
           description: The account money arrives in (debited).
-        amount: { $ref: '#/components/schemas/Money' }
+        amount:
+          allOf:
+            - $ref: '#/components/schemas/Money'
+          description: The amount leaving `from`, in `from`'s currency.
+        toAmount:
+          allOf:
+            - $ref: '#/components/schemas/Money'
+          description: |
+            The amount arriving in `to`, in `to`'s currency. Required when the two accounts differ in
+            currency; omit it (or match `amount`) when they share one.
       additionalProperties: false
 
     Transaction:
@@ -1006,6 +1024,13 @@ components:
       properties:
         id: { type: string, format: uuid }
         date: { type: string, format: date }
+        exchangeRate:
+          type: string
+          nullable: true
+          description: |
+            For a cross-currency transaction, the rate derived from the two legs (to-amount ÷
+            from-amount), a decimal string for reference only — never multiplied to make an amount
+            (ADR-0002). Null for a same-currency transaction.
         postings:
           type: array
           minItems: 2
@@ -1089,5 +1114,5 @@ components:
             TOO_MANY_ATTEMPTS, EMAIL_TAKEN, VALIDATION, INVALID_TOKEN, EMAIL_NOT_VERIFIED,
             SESSION_NOT_FOUND, GRANTEE_NOT_FOUND, VIEW_GRANT_EXISTS, VIEW_GRANT_NOT_FOUND,
             CANNOT_SHARE_WITH_SELF, SHARE_LINK_NOT_FOUND, ACCOUNT_NOT_FOUND, TRANSACTION_NOT_FOUND,
-            SAME_ACCOUNT, CROSS_CURRENCY_UNSUPPORTED.
+            SAME_ACCOUNT, CONVERTED_AMOUNT_REQUIRED.
       additionalProperties: false
