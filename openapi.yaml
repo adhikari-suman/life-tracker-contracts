@@ -2,17 +2,18 @@ openapi: 3.0.3
 
 info:
   title: Life Tracker API
-  version: 0.6.0
+  version: 0.7.0
   description: |
     The wire contract for Life Tracker. This document is the SINGLE source of truth for the
     shape of every request and response. Frontends generate their clients from it and never
     hand-write a request or response type; the backend generates nothing but must match it.
 
     This document covers **Identity & Sharing** (registration, login, tokens, sessions, and the
-    management of how a Book is shared) AND the first slice of the **Ledger** — accounts, and
-    recording transactions as balanced movements. Still to come: balance-based reporting (net worth,
-    spending, income), cross-currency transactions, splits and metadata, and the read endpoints a
-    viewer calls. If you need a Ledger field that isn't here, STOP and design it — do not invent one.
+    management of how a Book is shared) AND the **Ledger** — accounts, transactions recorded as
+    balanced movements (same- and cross-currency), reporting (net worth, spending, income), and
+    **labels**, the categorization of what money was for. Still to come: splits (several labelled
+    legs under one transaction), the rest of the metadata (merchant, branch), and the read endpoints
+    a viewer calls. If you need a Ledger field that isn't here, STOP and design it — do not invent one.
 
     ## Conventions
     - **Money crosses the wire as a string**: `{ "amount": "12.34", "currency": "USD" }`. A JSON
@@ -22,6 +23,11 @@ info:
     - **Time** is RFC 3339 / ISO 8601 UTC (`format: date-time`).
     - **Errors** use RFC 7807 `application/problem+json` (see `Problem`).
     - **Ids** are UUIDs unless noted.
+    - **Request bodies are strict** (`additionalProperties: false`, everywhere). A body that does not
+      match its schema — malformed JSON, or a field the schema does not declare — is rejected with
+      `400 MALFORMED_REQUEST`, never silently accepted with the stray field dropped. A typo'd field
+      name is an error, not a no-op. This is a blanket rule, so the per-operation responses below do
+      not each repeat the 400.
 
 servers:
   - url: https://api.lifetracker.example/v1
@@ -40,6 +46,11 @@ tags:
     description: The Ledger's accounts — where balances live, each with a kind and a fixed currency.
   - name: transactions
     description: Recording money movement as balanced double-entry postings.
+  - name: labels
+    description: |
+      The categorization tree — what money was FOR. Labels are metadata attached to a posting
+      (ADR-0014), never part of the double-entry core, and say nothing about what KIND of
+      transaction something is.
   - name: reports
     description: Computed-on-demand views — net worth, spending, income. Per currency.
 
@@ -596,12 +607,19 @@ paths:
           content:
             application/problem+json:
               schema: { $ref: '#/components/schemas/Problem' }
+        '404':
+          description: The referenced label does not exist in the caller's Book. Code `LABEL_NOT_FOUND`.
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/Problem' }
         '422':
           description: |
             A referenced account does not exist (`ACCOUNT_NOT_FOUND`), the two accounts are the same
             (`SAME_ACCOUNT`), a cross-currency movement is missing `toAmount`
-            (`CONVERTED_AMOUNT_REQUIRED`), or an amount is malformed, negative, or in the wrong
-            currency (`VALIDATION`).
+            (`CONVERTED_AMOUNT_REQUIRED`), an amount is malformed, negative, or in the wrong
+            currency (`VALIDATION`), a `labelId` was sent for a movement that has no single Income or
+            Expense leg to hold it (`LABEL_NOT_APPLICABLE` — either no such leg at all, or two of
+            them and no way to tell which was meant), or the label is archived (`LABEL_ARCHIVED`).
           content:
             application/problem+json:
               schema: { $ref: '#/components/schemas/Problem' }
@@ -656,6 +674,242 @@ paths:
             application/problem+json:
               schema: { $ref: '#/components/schemas/Problem' }
 
+  /labels:
+    post:
+      tags: [labels]
+      summary: Create a label
+      description: |
+        Creates a label in the caller's Book. A label says what money was **for** (`groceries`,
+        `salary`) — never what KIND of transaction something is; "internal transfer", "opening
+        balance" and "credit-card payment" are facts about the accounts a transaction touches, and
+        deliberately are not labels (ADR-0014).
+
+        Labels form a tree **at most three levels deep** with no cycles. Sibling names are unique
+        case-insensitively, so `other` may live under both `food` and `transport`; the casing you
+        send is preserved for display. Omit `parentId` to create a root.
+      operationId: createLabel
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/CreateLabelRequest' }
+      responses:
+        '201':
+          description: Label created.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Label' }
+        '401':
+          description: Not authenticated.
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/Problem' }
+        '404':
+          description: No such parent label in the caller's Book. Code `LABEL_NOT_FOUND`.
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/Problem' }
+        '422':
+          description: |
+            A sibling already bears this name (`LABEL_NAME_TAKEN`), the parent already sits at the
+            depth limit (`LABEL_DEPTH_EXCEEDED`), or the name is malformed (`VALIDATION`).
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/Problem' }
+    get:
+      tags: [labels]
+      summary: List the caller's labels, flat, with parent pointers
+      description: |
+        Every label in the caller's Book, flat — build the tree from `parentId`. A personal Book
+        holds dozens of labels rather than thousands, so there is deliberately no search endpoint:
+        fetch once and filter client-side. Archived labels are omitted unless `includeArchived`.
+      operationId: listLabels
+      parameters:
+        - name: includeArchived
+          in: query
+          required: false
+          description: Include labels retired from use. Default false.
+          schema: { type: boolean, default: false }
+      responses:
+        '200':
+          description: The caller's labels.
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/Label' }
+        '401':
+          description: Not authenticated.
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/Problem' }
+
+  /labels/{labelId}:
+    patch:
+      tags: [labels]
+      summary: Rename, reparent, or archive a label
+      description: |
+        Every field is optional; omitted fields are left alone. Note the distinction on `parentId`:
+        **omitting** it leaves the parent unchanged, while sending it as **`null`** moves the label
+        to the root.
+
+        Reparenting is **retroactive** — roll-up is derived from the tree as it stands now, so moving
+        a label changes past summaries too (ADR-0015). That is intended, and its blast radius is
+        confined to the label breakdown: no balance, net worth, per-account spending or income figure
+        consults labels. Root-level totals never move; only a subtree's contribution shifts branches.
+
+        The depth limit is checked against the **whole subtree** being moved, not just this label —
+        a two-deep subtree cannot move under a label that already sits at level two.
+
+        Archiving retires a label from the picker without disturbing what it was already applied to;
+        history still reports under it.
+      operationId: updateLabel
+      parameters:
+        - name: labelId
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/UpdateLabelRequest' }
+      responses:
+        '200':
+          description: The updated label.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Label' }
+        '401':
+          description: Not authenticated.
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/Problem' }
+        '404':
+          description: No such label, or no such parent, in the caller's Book. Code `LABEL_NOT_FOUND`.
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/Problem' }
+        '422':
+          description: |
+            A sibling already bears the new name (`LABEL_NAME_TAKEN`), the move would put this label
+            or any of its descendants past the depth limit (`LABEL_DEPTH_EXCEEDED`), or the move
+            would place the label under its own descendant (`LABEL_CYCLE`).
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/Problem' }
+    delete:
+      tags: [labels]
+      summary: Delete a label — only if it is unused and childless
+      description: |
+        Deleting is for tidying, never for destroying history, so it is refused while anything still
+        depends on the label (ADR-0015). To retire a label that is in use, **archive** it instead
+        (`PATCH`), which keeps history readable while removing it from the picker. To fold one label
+        into another, retag its postings first — a deliberate act, rather than a silent side effect
+        of pressing delete.
+      operationId: deleteLabel
+      parameters:
+        - name: labelId
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        '204':
+          description: Label deleted.
+        '401':
+          description: Not authenticated.
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/Problem' }
+        '404':
+          description: No such label in the caller's Book. Code `LABEL_NOT_FOUND`.
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/Problem' }
+        '409':
+          description: |
+            Postings are still tagged with it (`LABEL_IN_USE`) or it still has children
+            (`LABEL_HAS_CHILDREN`).
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/Problem' }
+
+  /postings/{postingId}/label:
+    put:
+      tags: [labels]
+      summary: Set (or replace) the label on a posting
+      description: |
+        A label is metadata attached to a posting, not a field of it — which is why this is a
+        sub-resource rather than a patch of the posting (ADR-0014). The posting itself is immutable
+        ledger truth and is never rewritten; only this attachment changes.
+
+        A posting may be retagged **at any time, however old it is**. Retagging alters the label
+        breakdown and nothing else — net worth, per-account spending and income are byte-identical
+        afterwards, because none of them consult labels.
+
+        Only a posting to an **Income or Expense** account can carry a label: it is the leg that
+        records money entering or leaving your world. A posting to an Asset, Liability or Equity
+        account has nothing to categorize, so it is refused (`LABEL_NOT_APPLICABLE`) rather than
+        silently ignored — attempting it almost always means the wrong account kind was chosen.
+      operationId: setPostingLabel
+      parameters:
+        - name: postingId
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/SetPostingLabelRequest' }
+      responses:
+        '204':
+          description: Label attached.
+        '401':
+          description: Not authenticated.
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/Problem' }
+        '404':
+          description: |
+            No such posting (`POSTING_NOT_FOUND`) or no such label (`LABEL_NOT_FOUND`) in the
+            caller's Book.
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/Problem' }
+        '422':
+          description: |
+            The posting is not to an Income or Expense account (`LABEL_NOT_APPLICABLE`), or the
+            label is archived and cannot be newly applied (`LABEL_ARCHIVED`).
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/Problem' }
+    delete:
+      tags: [labels]
+      summary: Clear the label on a posting
+      description: |
+        Removes the attachment. The posting becomes uncategorized and its amount moves into the
+        Uncategorized row of any label breakdown — it never leaves the totals.
+      operationId: clearPostingLabel
+      parameters:
+        - name: postingId
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        '204':
+          description: Label cleared (also when the posting had none).
+        '401':
+          description: Not authenticated.
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/Problem' }
+        '404':
+          description: No such posting in the caller's Book. Code `POSTING_NOT_FOUND`.
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/Problem' }
+
   /reports/net-worth:
     get:
       tags: [reports]
@@ -681,11 +935,16 @@ paths:
   /reports/spending:
     get:
       tags: [reports]
-      summary: Spending over a date range — Expense-account activity, per account and currency
+      summary: Spending over a date range — Expense-account activity, per account, per label, per currency
       description: |
         Sums Expense-account movement over the range (ADR-0004). Transfers, lends, and repayments never
         touch an Expense account, so they are excluded by construction (ADR-0001) — this is only real
-        spending. Broken down per Expense account, totalled per currency. Omit the range for all-time.
+        spending. Omit the range for all-time.
+
+        Broken down two ways over the same money: `byAccount` (where it was booked) and `byLabel`
+        (what it was for), each totalled per currency. The two are different slices of one
+        computation and **must reconcile**: summing `own` across every `byLabel` row — including the
+        Uncategorized row — gives the same per-currency figure as `byAccount` and as `totals`.
       operationId: getSpending
       parameters:
         - name: from
@@ -713,11 +972,14 @@ paths:
   /reports/income:
     get:
       tags: [reports]
-      summary: Income over a date range — Income-account activity, per account and currency
+      summary: Income over a date range — Income-account activity, per account, per label, per currency
       description: |
         Sums Income-account movement over the range (ADR-0004). Like spending, transfers and repayments
-        are excluded by construction. Broken down per Income account, totalled per currency. Omit the
-        range for all-time.
+        are excluded by construction. Omit the range for all-time.
+
+        Broken down per Income account (`byAccount`) and per label (`byLabel`) — labels apply to
+        income just as they do to spending (`salary`, `freelance`, `interest`) — each totalled per
+        currency, with the same reconciliation rule as `/reports/spending`.
       operationId: getIncome
       parameters:
         - name: from
@@ -978,11 +1240,25 @@ components:
     Posting:
       type: object
       description: One leg of a transaction — a debit or credit of a non-negative amount to an account.
-      required: [accountId, direction, amount]
+      required: [id, accountId, direction, amount]
       properties:
+        id:
+          type: string
+          format: uuid
+          description: |
+            The posting's stable identity — what a label is attached to, and what
+            `/postings/{postingId}/label` addresses.
         accountId: { type: string, format: uuid }
         direction: { type: string, enum: [DEBIT, CREDIT] }
         amount: { $ref: '#/components/schemas/Money' }
+        labelId:
+          type: string
+          format: uuid
+          nullable: true
+          description: |
+            The label attached to this posting, or null. Only a posting to an Income or Expense
+            account can carry one (ADR-0014); on any other posting this is always null. Null on an
+            Income/Expense posting means uncategorized, which is a valid state, not missing data.
       additionalProperties: false
 
     RecordTransactionRequest:
@@ -1015,6 +1291,21 @@ components:
           description: |
             The amount arriving in `to`, in `to`'s currency. Required when the two accounts differ in
             currency; omit it (or match `amount`) when they share one.
+        labelId:
+          type: string
+          format: uuid
+          description: |
+            Optional. What the money was for. The server attaches it to whichever leg is the Income
+            or Expense account — you do not say which posting (ADR-0014).
+
+            Only a transaction with exactly ONE such leg can carry a label. A movement between two
+            accounts you own — an internal transfer (Asset→Asset), a debt payment (Asset→Liability),
+            an opening balance (Equity→Asset) — has nothing to categorize, and sending a label with
+            one is refused (`LABEL_NOT_APPLICABLE`), not ignored: it nearly always means the wrong
+            account kind was picked. The mirror case is refused for the opposite reason — an
+            Income→Expense movement has TWO legs that could hold a category, and one label cannot say
+            which; splits will settle that later. Omit `labelId` to leave the transaction
+            uncategorized, which is a valid state.
       additionalProperties: false
 
     Transaction:
@@ -1085,17 +1376,139 @@ components:
 
     ActivityReport:
       type: object
-      description: Spending or income over a date range — per account, and totalled per currency.
-      required: [byAccount, totals]
+      description: |
+        Spending or income over a date range, sliced two ways over the same money — by account (where
+        it was booked) and by label (what it was for) — and totalled per currency.
+      required: [byAccount, byLabel, totals]
       properties:
         from: { type: string, format: date, nullable: true }
         to: { type: string, format: date, nullable: true }
         byAccount:
           type: array
           items: { $ref: '#/components/schemas/AccountAmount' }
+        byLabel:
+          type: array
+          description: |
+            One row per label per currency, plus a single Uncategorized row (null `labelId`) for
+            postings carrying no label. A label appears when EITHER of its figures is non-zero, so a
+            parent with no direct spending still shows the total underneath it.
+          items: { $ref: '#/components/schemas/LabelAmount' }
         totals:
           type: array
           items: { $ref: '#/components/schemas/CurrencyAmount' }
+      additionalProperties: false
+
+    LabelAmount:
+      type: object
+      description: |
+        One label's share of a report, in one currency. A label with postings in several currencies
+        appears once per currency.
+
+        Two figures, and the difference matters: `own` counts only postings tagged with THIS label,
+        while `rolledUp` adds everything tagged with any of its descendants. Summing `own` across
+        rows reproduces `totals`; summing `rolledUp` does NOT — a child's amount appears in its own
+        row AND again in every ancestor's row, so adding them double-counts. This failure is silent:
+        the number simply comes out too big.
+      required: [labelId, name, path, parentLabelId, currency, own, rolledUp]
+      properties:
+        labelId:
+          type: string
+          format: uuid
+          nullable: true
+          description: Null on the single Uncategorized row — the postings carrying no label at all.
+        name:
+          type: string
+          description: The label's own name (`fast food`), or `Uncategorized` on the null-id row.
+        path:
+          type: string
+          description: |
+            Full path from the root, for display and disambiguation (`food / restaurants / fast
+            food`) — sibling names are unique only within a parent, so the leaf name alone can be
+            ambiguous.
+        parentLabelId:
+          type: string
+          format: uuid
+          nullable: true
+          description: Null for a root label, and for the Uncategorized row.
+        currency: { type: string, description: ISO 4217 code. }
+        own:
+          allOf:
+            - $ref: '#/components/schemas/Money'
+          description: Postings tagged with this label directly. These are the figures that sum to `totals`.
+        rolledUp:
+          allOf:
+            - $ref: '#/components/schemas/Money'
+          description: |
+            `own` plus every descendant's. Never sum this across rows. Equals `own` on the
+            Uncategorized row and on any leaf.
+      additionalProperties: false
+
+    Label:
+      type: object
+      description: |
+        A user-defined category — what money was for. One node of a tree at most three levels deep;
+        build the tree from `parentId`.
+      required: [id, name, path, parentId, archived]
+      properties:
+        id: { type: string, format: uuid }
+        name: { type: string, description: 'The label''s own name, as typed (`fast food`).' }
+        path:
+          type: string
+          description: Full path from the root (`food / restaurants / fast food`).
+        parentId:
+          type: string
+          format: uuid
+          nullable: true
+          description: Null for a root label.
+        archived:
+          type: boolean
+          description: |
+            Retired from use — hidden from the picker and not offered for new tagging, while
+            everything already tagged with it still reports under it.
+      additionalProperties: false
+
+    CreateLabelRequest:
+      type: object
+      required: [name]
+      properties:
+        name:
+          type: string
+          minLength: 1
+          maxLength: 100
+          description: |
+            Unique among its siblings, compared case-insensitively; the casing you send is preserved
+            for display.
+        parentId:
+          type: string
+          format: uuid
+          description: |
+            Omit to create a root label. The parent must itself be at most two levels deep, since
+            the tree stops at three.
+      additionalProperties: false
+
+    UpdateLabelRequest:
+      type: object
+      description: |
+        Every field is optional and omitted fields are left alone. `parentId` is the one worth
+        reading twice: **omitted** leaves the parent unchanged, **explicit null** moves the label to
+        the root.
+      properties:
+        name: { type: string, minLength: 1, maxLength: 100 }
+        parentId:
+          type: string
+          format: uuid
+          nullable: true
+          description: Explicit null moves the label to the root. Omit to leave its parent unchanged.
+        archived:
+          type: boolean
+          description: True retires the label from the picker; false brings it back into use.
+      additionalProperties: false
+
+    SetPostingLabelRequest:
+      type: object
+      required: [labelId]
+      properties:
+        labelId: { type: string, format: uuid }
       additionalProperties: false
 
     Problem:
