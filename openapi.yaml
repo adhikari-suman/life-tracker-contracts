@@ -2,7 +2,7 @@ openapi: 3.0.3
 
 info:
   title: Life Tracker API
-  version: 0.7.0
+  version: 0.8.0
   description: |
     The wire contract for Life Tracker. This document is the SINGLE source of truth for the
     shape of every request and response. Frontends generate their clients from it and never
@@ -20,7 +20,13 @@ info:
       number is an IEEE 754 double in JavaScript and is corrupted before any client reads it.
       No money fields appear in this identity slice, but the rule holds the moment the Ledger
       surface lands.
-    - **Time** is RFC 3339 / ISO 8601 UTC (`format: date-time`).
+    - **Instants** are RFC 3339 / ISO 8601 UTC (`format: date-time`) — `createdAt`, `lastActiveAt`
+      and every other moment the SYSTEM observed.
+    - **A transaction's own date and time are not instants** and must not be treated as ones. They
+      are a wall-clock reading supplied by the person recording it: `date` plus a zoneless `HH:mm`
+      `time` (ADR-0018). Converting either into UTC would let a late-evening purchase drift into
+      the next day and change which month it reports in. The distinction has names in the domain
+      glossary — *Occurred At* for these, *Recorded At* for the instant beside them.
     - **Errors** use RFC 7807 `application/problem+json` (see `Problem`).
     - **Ids** are UUIDs unless noted.
     - **Request bodies are strict** (`additionalProperties: false`, everywhere). A body that does not
@@ -1267,12 +1273,28 @@ components:
         A movement — money out of `from` (credited), into `to` (debited). Same-currency: `amount`
         alone. Cross-currency: `amount` is the real figure leaving `from` and `toAmount` the real
         figure arriving in `to`, each in its account's currency (ADR-0002).
-      required: [date, from, to, amount]
+      required: [date, time, from, to, amount]
       properties:
         date:
           type: string
           format: date
-          description: The calendar date of the transaction (a precise timestamp is metadata, ADR-0003).
+          description: |
+            The calendar date the money moved. This is the only part reporting groups by
+            (ADR-0018), so it is the half that must be right even when the time is guessed.
+        time:
+          type: string
+          pattern: '^([01][0-9]|2[0-3]):[0-5][0-9]$'
+          description: |
+            The wall-clock time the money moved, as `HH:mm` — 19:42 means 19:42 where the person
+            was standing (ADR-0018).
+
+            Deliberately NOT `format: time`: RFC 3339 full-time carries an offset, and an offset
+            is precisely what this value must not have. Converting it to any other zone would let
+            a late-evening purchase drift into the next day and change which month it reports in.
+
+            Required, because the column is NOT NULL and the server refuses to invent a moment it
+            cannot know — it runs in UTC and has no idea what the clock on your wall said. The
+            client supplies it from the device, defaulting to now.
         from:
           type: string
           format: uuid
@@ -1311,10 +1333,17 @@ components:
     Transaction:
       type: object
       description: A recorded transaction, as its balanced postings (the ledger truth, ADR-0012).
-      required: [id, date, postings]
+      required: [id, date, time, postings]
       properties:
         id: { type: string, format: uuid }
         date: { type: string, format: date }
+        time:
+          type: string
+          pattern: '^([01][0-9]|2[0-3]):[0-5][0-9]$'
+          description: |
+            Wall-clock `HH:mm`, zoneless — see the note on RecordTransactionRequest.time. Within a
+            day this is what orders the ledger (ADR-0018): newest first is
+            `date desc, time desc`, with the server's own record-time breaking exact ties.
         exchangeRate:
           type: string
           nullable: true

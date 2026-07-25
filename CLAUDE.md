@@ -27,7 +27,27 @@ a numeric amount is corrupted before any client reads it. Holds in both directio
 - Errors are RFC 7807 (`Problem`). A domain exception maps to a status code in the backend's
   `@RestControllerAdvice`, never in the spec.
 
+## Time
+
+Two different things, and conflating them is the mistake this section exists to stop.
+
+- **Instants** — `createdAt`, `lastActiveAt`, anything the SYSTEM observed. RFC 3339 UTC,
+  `format: date-time`.
+- **A transaction's own date and time** — a wall-clock reading supplied by the person recording
+  it. `date` plus a zoneless `HH:mm` `time`, and deliberately NOT `format: time`, whose RFC 3339
+  `full-time` carries an offset. Never convert either into UTC: a late-evening purchase would
+  drift into the next day and change which month it reports in (ADR-0018).
+
+The domain glossary names them *Occurred At* and *Recorded At*. Use those words.
+
 ## Scope
 
-Identity & Sharing only for now (auth, sessions, sharing). The Ledger surface is a separate,
-later design — do not add Ledger endpoints or fields here until that is designed.
+Identity & Sharing **and** the Ledger — accounts, transactions, labels and reporting all live
+here now, added across v0.4.0–v0.8.0.
+
+This section used to read "Identity & Sharing only for now … do not add Ledger endpoints or
+fields here until that is designed." That was true when it was written and became false four
+releases ago, at which point it was worse than no rule: it forbade, in writing, the thing every
+subsequent change actually did. Still to come — splits, merchant and branch metadata, and the
+read endpoints a viewer calls — is tracked in the spec's own `info.description`, which is one
+place rather than two that can disagree.
