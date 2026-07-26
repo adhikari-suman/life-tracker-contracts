@@ -38,9 +38,13 @@ info:
       cannot be read as written; one that reads cleanly and only then fails its schema — a missing
       `required` field, a value outside its declared `pattern`, `minLength` or `enum` — is `422`
       with code `VALIDATION`. The dividing line is whether the body could be understood at all.
-      Also a blanket rule, so the per-operation responses do not repeat it either; where an
-      operation documents a MORE specific 422 code (`SAME_ACCOUNT`, `CONVERTED_AMOUNT_REQUIRED`,
-      `LABEL_NOT_APPLICABLE`, `LABEL_ARCHIVED`), that code wins over the generic one.
+      Also a blanket rule, so the per-operation responses do not repeat it either. Where an
+      operation documents its OWN answer, that answer wins — whether a more specific 422 code
+      (`SAME_ACCOUNT`, `CONVERTED_AMOUNT_REQUIRED`, `LABEL_NOT_APPLICABLE`, `LABEL_ARCHIVED`) or a
+      different status entirely. Two do so deliberately and are not exceptions to be tidied away:
+      `/auth/verify-email` answers a missing token with `400 INVALID_TOKEN`, because absent and
+      malformed are the same thing to a credential; and `/auth/password-reset` answers `202`
+      whatever it is sent, because varying the response would reveal who has an account.
 
       Neither case is ever a `5xx`. A required field arriving absent is the client's error and must
       be answered as one; if it reaches far enough in to throw, that is a bug in the server, not a
