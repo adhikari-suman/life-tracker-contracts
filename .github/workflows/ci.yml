@@ -1,0 +1,68 @@
+# The spec is the source of truth for three repos, so a broken one breaks every consumer's build
+# at once. That is the whole reason this runs on its own rather than being caught downstream.
+name: ci
+
+on:
+  push:
+    branches: [main, dev]
+  pull_request:
+    branches: [main, dev]
+
+permissions:
+  contents: read
+
+jobs:
+  spec:
+    name: validate the spec
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+
+      # Structural validation: does this parse as OpenAPI 3.0.3 and do all $refs resolve.
+      - name: validate openapi.yaml
+        run: npx -y @redocly/cli@latest lint openapi.yaml --extends=recommended --format=stylish
+
+      # The consumers generate from this file. A spec that validates but will not GENERATE is still
+      # broken for every client that exists, and catching that here rather than in the web repo
+      # matters: contracts merges first, so a spec that lands broken on dev fails every web PR
+      # afterwards.
+      #
+      # Installed rather than run through `npx -y`: openapi-ts needs typescript as a peer (it uses
+      # the compiler API), and a bare npx into an empty directory crashes on
+      # "Cannot read properties of undefined (reading 'LineFeed')" — which looks like a bad spec
+      # and is not one. Versions match life-tracker-web's package.json.
+      - name: prove a client can be generated from it
+        run: |
+          mkdir -p /tmp/gen && cd /tmp/gen
+          npm init -y >/dev/null 2>&1
+          npm i -D --no-audit --no-fund \
+            @hey-api/openapi-ts@0.89.2 @hey-api/client-fetch typescript@~6.0.2 >/dev/null
+          npx openapi-ts -i "$GITHUB_WORKSPACE/openapi.yaml" -o ./out -c @hey-api/client-fetch
+          test -s ./out/types.gen.ts || { echo "::error::no types were generated"; exit 1; }
+          echo "generated $(wc -l < ./out/types.gen.ts) lines of types"
+
+      # info.version is how consumers know what they are pinned to; an unbumped spec is a silent
+      # way for two repos to disagree about which contract they implement.
+      # BASE_REF through env, not interpolated into the script: a ${{ }} expansion is substituted
+      # as raw text before bash sees it, and a git ref may legally contain $ ( ) & | < > and quotes.
+      - name: the version must be bumped when the spec changes
+        if: github.event_name == 'pull_request'
+        env:
+          BASE_REF: ${{ github.base_ref }}
+        run: |
+          git fetch --depth=1 origin "$BASE_REF"
+          if git diff --quiet "origin/$BASE_REF" -- openapi.yaml; then
+            echo "openapi.yaml unchanged — nothing to bump."
+            exit 0
+          fi
+          before=$(git show "origin/$BASE_REF:openapi.yaml" | grep -m1 '^  version:' | awk '{print $2}')
+          after=$(grep -m1 '^  version:' openapi.yaml | awk '{print $2}')
+          echo "version: $before -> $after"
+          if [ "$before" = "$after" ]; then
+            echo "::error::openapi.yaml changed but info.version is still $after. Bump it."
+            exit 1
+          fi
