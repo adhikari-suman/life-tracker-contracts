@@ -2,7 +2,7 @@ openapi: 3.0.3
 
 info:
   title: Life Tracker API
-  version: 0.8.0
+  version: 0.8.1
   description: |
     The wire contract for Life Tracker. This document is the SINGLE source of truth for the
     shape of every request and response. Frontends generate their clients from it and never
@@ -34,6 +34,21 @@ info:
       `400 MALFORMED_REQUEST`, never silently accepted with the stray field dropped. A typo'd field
       name is an error, not a no-op. This is a blanket rule, so the per-operation responses below do
       not each repeat the 400.
+    - **A body that PARSES but is invalid is `422 VALIDATION`.** The 400 above is for a body that
+      cannot be read as written; one that reads cleanly and only then fails its schema — a missing
+      `required` field, a value outside its declared `pattern`, `minLength` or `enum` — is `422`
+      with code `VALIDATION`. The dividing line is whether the body could be understood at all.
+      Also a blanket rule, so the per-operation responses do not repeat it either. Where an
+      operation documents its OWN answer, that answer wins — whether a more specific 422 code
+      (`SAME_ACCOUNT`, `CONVERTED_AMOUNT_REQUIRED`, `LABEL_NOT_APPLICABLE`, `LABEL_ARCHIVED`) or a
+      different status entirely. Two do so deliberately and are not exceptions to be tidied away:
+      `/auth/verify-email` answers a missing token with `400 INVALID_TOKEN`, because absent and
+      malformed are the same thing to a credential; and `/auth/password-reset` answers `202`
+      whatever it is sent, because varying the response would reveal who has an account.
+
+      Neither case is ever a `5xx`. A required field arriving absent is the client's error and must
+      be answered as one; if it reaches far enough in to throw, that is a bug in the server, not a
+      shape the contract permits.
 
 servers:
   - url: https://api.lifetracker.example/v1
