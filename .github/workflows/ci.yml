@@ -26,17 +26,23 @@ jobs:
       - name: validate openapi.yaml
         run: npx -y @redocly/cli@latest lint openapi.yaml --extends=recommended --format=stylish
 
-      # The consumers generate from this file. If generation fails the spec is broken for them
-      # whatever a validator says, so we prove it generates rather than assuming it does.
+      # The consumers generate from this file. A spec that validates but will not GENERATE is still
+      # broken for every client that exists, and catching that here rather than in the web repo
+      # matters: contracts merges first, so a spec that lands broken on dev fails every web PR
+      # afterwards.
+      #
+      # Installed rather than run through `npx -y`: openapi-ts needs typescript as a peer (it uses
+      # the compiler API), and a bare npx into an empty directory crashes on
+      # "Cannot read properties of undefined (reading 'LineFeed')" — which looks like a bad spec
+      # and is not one. Versions match life-tracker-web's package.json.
       - name: prove a client can be generated from it
         run: |
           mkdir -p /tmp/gen && cd /tmp/gen
           npm init -y >/dev/null 2>&1
-          npx -y @hey-api/openapi-ts@0.89.2 \
-            -i "$GITHUB_WORKSPACE/openapi.yaml" \
-            -o ./out \
-            -c @hey-api/client-fetch
-          test -s ./out/types.gen.ts || { echo "no types generated"; exit 1; }
+          npm i -D --no-audit --no-fund \
+            @hey-api/openapi-ts@0.89.2 @hey-api/client-fetch typescript@~6.0.2 >/dev/null
+          npx openapi-ts -i "$GITHUB_WORKSPACE/openapi.yaml" -o ./out -c @hey-api/client-fetch
+          test -s ./out/types.gen.ts || { echo "::error::no types were generated"; exit 1; }
           echo "generated $(wc -l < ./out/types.gen.ts) lines of types"
 
       # info.version is how consumers know what they are pinned to; an unbumped spec is a silent

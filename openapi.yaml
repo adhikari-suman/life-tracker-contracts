@@ -2,7 +2,7 @@ openapi: 3.0.3
 
 info:
   title: Life Tracker API
-  version: 0.8.1
+  version: 0.8.2
   description: |
     The wire contract for Life Tracker. This document is the SINGLE source of truth for the
     shape of every request and response. Frontends generate their clients from it and never
