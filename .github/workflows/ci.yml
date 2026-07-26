@@ -1,0 +1,58 @@
+# The spec is the source of truth for three repos, so a broken one breaks every consumer's build
+# at once. That is the whole reason this runs on its own rather than being caught downstream.
+name: ci
+
+on:
+  push:
+    branches: [main, dev]
+  pull_request:
+    branches: [main, dev]
+
+permissions:
+  contents: read
+
+jobs:
+  spec:
+    name: validate the spec
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+
+      # Structural validation: does this parse as OpenAPI 3.0.3 and do all $refs resolve.
+      - name: validate openapi.yaml
+        run: npx -y @redocly/cli@latest lint openapi.yaml --extends=recommended --format=stylish
+
+      # The consumers generate from this file. If generation fails the spec is broken for them
+      # whatever a validator says, so we prove it generates rather than assuming it does.
+      - name: prove a client can be generated from it
+        run: |
+          mkdir -p /tmp/gen && cd /tmp/gen
+          npm init -y >/dev/null 2>&1
+          npx -y @hey-api/openapi-ts@0.89.2 \
+            -i "$GITHUB_WORKSPACE/openapi.yaml" \
+            -o ./out \
+            -c @hey-api/client-fetch
+          test -s ./out/types.gen.ts || { echo "no types generated"; exit 1; }
+          echo "generated $(wc -l < ./out/types.gen.ts) lines of types"
+
+      # info.version is how consumers know what they are pinned to; an unbumped spec is a silent
+      # way for two repos to disagree about which contract they implement.
+      - name: the version must be bumped when the spec changes
+        if: github.event_name == 'pull_request'
+        run: |
+          git fetch --depth=1 origin "${{ github.base_ref }}"
+          if git diff --quiet "origin/${{ github.base_ref }}" -- openapi.yaml; then
+            echo "openapi.yaml unchanged — nothing to bump."
+            exit 0
+          fi
+          before=$(git show "origin/${{ github.base_ref }}:openapi.yaml" | grep -m1 '^  version:' | awk '{print $2}')
+          after=$(grep -m1 '^  version:' openapi.yaml | awk '{print $2}')
+          echo "version: $before -> $after"
+          if [ "$before" = "$after" ]; then
+            echo "::error::openapi.yaml changed but info.version is still $after. Bump it."
+            exit 1
+          fi
