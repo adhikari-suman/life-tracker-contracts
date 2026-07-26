@@ -1202,8 +1202,11 @@ components:
               kid: { type: string }
               alg: { type: string }
               use: { type: string }
-              n: { type: string, description: RSA modulus, base64url. }
-              e: { type: string, description: RSA exponent, base64url. }
+              # Quoted, because a bare comma inside a YAML flow mapping ends the value: unquoted,
+              # `description: RSA modulus, base64url.` parsed as a description of "RSA modulus"
+              # plus a stray property named `base64url.`, which is not valid here.
+              n: { type: string, description: "RSA modulus, base64url." }
+              e: { type: string, description: "RSA exponent, base64url." }
 
     Money:
       type: object
