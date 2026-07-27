@@ -2,7 +2,7 @@ openapi: 3.0.3
 
 info:
   title: Life Tracker API
-  version: 0.7.0
+  version: 0.8.2
   description: |
     The wire contract for Life Tracker. This document is the SINGLE source of truth for the
     shape of every request and response. Frontends generate their clients from it and never
@@ -20,7 +20,13 @@ info:
       number is an IEEE 754 double in JavaScript and is corrupted before any client reads it.
       No money fields appear in this identity slice, but the rule holds the moment the Ledger
       surface lands.
-    - **Time** is RFC 3339 / ISO 8601 UTC (`format: date-time`).
+    - **Instants** are RFC 3339 / ISO 8601 UTC (`format: date-time`) — `createdAt`, `lastActiveAt`
+      and every other moment the SYSTEM observed.
+    - **A transaction's own date and time are not instants** and must not be treated as ones. They
+      are a wall-clock reading supplied by the person recording it: `date` plus a zoneless `HH:mm`
+      `time` (ADR-0018). Converting either into UTC would let a late-evening purchase drift into
+      the next day and change which month it reports in. The distinction has names in the domain
+      glossary — *Occurred At* for these, *Recorded At* for the instant beside them.
     - **Errors** use RFC 7807 `application/problem+json` (see `Problem`).
     - **Ids** are UUIDs unless noted.
     - **Request bodies are strict** (`additionalProperties: false`, everywhere). A body that does not
@@ -28,6 +34,21 @@ info:
       `400 MALFORMED_REQUEST`, never silently accepted with the stray field dropped. A typo'd field
       name is an error, not a no-op. This is a blanket rule, so the per-operation responses below do
       not each repeat the 400.
+    - **A body that PARSES but is invalid is `422 VALIDATION`.** The 400 above is for a body that
+      cannot be read as written; one that reads cleanly and only then fails its schema — a missing
+      `required` field, a value outside its declared `pattern`, `minLength` or `enum` — is `422`
+      with code `VALIDATION`. The dividing line is whether the body could be understood at all.
+      Also a blanket rule, so the per-operation responses do not repeat it either. Where an
+      operation documents its OWN answer, that answer wins — whether a more specific 422 code
+      (`SAME_ACCOUNT`, `CONVERTED_AMOUNT_REQUIRED`, `LABEL_NOT_APPLICABLE`, `LABEL_ARCHIVED`) or a
+      different status entirely. Two do so deliberately and are not exceptions to be tidied away:
+      `/auth/verify-email` answers a missing token with `400 INVALID_TOKEN`, because absent and
+      malformed are the same thing to a credential; and `/auth/password-reset` answers `202`
+      whatever it is sent, because varying the response would reveal who has an account.
+
+      Neither case is ever a `5xx`. A required field arriving absent is the client's error and must
+      be answered as one; if it reaches far enough in to throw, that is a bug in the server, not a
+      shape the contract permits.
 
 servers:
   - url: https://api.lifetracker.example/v1
@@ -1181,8 +1202,11 @@ components:
               kid: { type: string }
               alg: { type: string }
               use: { type: string }
-              n: { type: string, description: RSA modulus, base64url. }
-              e: { type: string, description: RSA exponent, base64url. }
+              # Quoted, because a bare comma inside a YAML flow mapping ends the value: unquoted,
+              # `description: RSA modulus, base64url.` parsed as a description of "RSA modulus"
+              # plus a stray property named `base64url.`, which is not valid here.
+              n: { type: string, description: "RSA modulus, base64url." }
+              e: { type: string, description: "RSA exponent, base64url." }
 
     Money:
       type: object
@@ -1267,12 +1291,28 @@ components:
         A movement — money out of `from` (credited), into `to` (debited). Same-currency: `amount`
         alone. Cross-currency: `amount` is the real figure leaving `from` and `toAmount` the real
         figure arriving in `to`, each in its account's currency (ADR-0002).
-      required: [date, from, to, amount]
+      required: [date, time, from, to, amount]
       properties:
         date:
           type: string
           format: date
-          description: The calendar date of the transaction (a precise timestamp is metadata, ADR-0003).
+          description: |
+            The calendar date the money moved. This is the only part reporting groups by
+            (ADR-0018), so it is the half that must be right even when the time is guessed.
+        time:
+          type: string
+          pattern: '^([01][0-9]|2[0-3]):[0-5][0-9]$'
+          description: |
+            The wall-clock time the money moved, as `HH:mm` — 19:42 means 19:42 where the person
+            was standing (ADR-0018).
+
+            Deliberately NOT `format: time`: RFC 3339 full-time carries an offset, and an offset
+            is precisely what this value must not have. Converting it to any other zone would let
+            a late-evening purchase drift into the next day and change which month it reports in.
+
+            Required, because the column is NOT NULL and the server refuses to invent a moment it
+            cannot know — it runs in UTC and has no idea what the clock on your wall said. The
+            client supplies it from the device, defaulting to now.
         from:
           type: string
           format: uuid
@@ -1311,10 +1351,17 @@ components:
     Transaction:
       type: object
       description: A recorded transaction, as its balanced postings (the ledger truth, ADR-0012).
-      required: [id, date, postings]
+      required: [id, date, time, postings]
       properties:
         id: { type: string, format: uuid }
         date: { type: string, format: date }
+        time:
+          type: string
+          pattern: '^([01][0-9]|2[0-3]):[0-5][0-9]$'
+          description: |
+            Wall-clock `HH:mm`, zoneless — see the note on RecordTransactionRequest.time. Within a
+            day this is what orders the ledger (ADR-0018): newest first is
+            `date desc, time desc`, with the server's own record-time breaking exact ties.
         exchangeRate:
           type: string
           nullable: true
